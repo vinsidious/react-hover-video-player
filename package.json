@@ -121,5 +121,8 @@
       "@semantic-release/npm",
       "@semantic-release/github"
     ]
+  },
+  "dependencies": {
+    "react-player": "^2.16.0"
   }
 }

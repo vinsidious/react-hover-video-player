@@ -5,6 +5,7 @@ import React, {
   useState,
   useCallback,
 } from "react";
+import ReactPlayer from "react-player/youtube";
 
 import {
   expandToFillContainerStyle,
@@ -17,6 +18,10 @@ import {
 } from "./HoverVideoPlayer.styles";
 
 import { HoverVideoPlayerProps } from "./HoverVideoPlayer.types";
+
+const isYouTubeUrl = (url: string) => {
+  return url.match(/^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.?be)\/.+$/);
+};
 
 /**
  * @component HoverVideoPlayer
@@ -68,11 +73,14 @@ export default function HoverVideoPlayer({
   // Element refs
   const containerRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const playerRef = useRef<ReactPlayer>(null);
   // Forward out local videoRef along to the videoRef prop
   useImperativeHandle(
     forwardedVideoRef,
     () => videoRef.current as HTMLVideoElement
   );
+
+  const isYouTube = typeof videoSrc === "string" && isYouTubeUrl(videoSrc);
 
   // Effects set attributes on the video which can't be done via props
   useEffect(() => {
@@ -203,45 +211,50 @@ export default function HoverVideoPlayer({
   ]);
 
   const playVideo = useCallback(() => {
-    const videoElement = videoRef.current;
-    if (!videoElement) return;
+    if (isYouTube) {
+      playerRef.current?.seekTo(playbackRangeStart || 0);
+      playerRef.current?.getInternalPlayer().playVideo();
+    } else {
+      const videoElement = videoRef.current;
+      if (!videoElement) return;
 
-    videoElement.play().catch((error: DOMException) => {
-      // Suppress logging for "AbortError" errors, which are thrown when the video is paused while it was trying to play.
-      // These errors are expected and happen often, so they can be safely ignored.
-      if (error.name === "AbortError") {
-        return;
-      }
+      videoElement.play().catch((error: DOMException) => {
+        // Suppress logging for "AbortError" errors, which are thrown when the video is paused while it was trying to play.
+        // These errors are expected and happen often, so they can be safely ignored.
+        if (error.name === "AbortError") {
+          return;
+        }
 
-      // Additional handling for when browsers block playback for unmuted videos.
-      // This is unfortunately necessary because most modern browsers do not allow playing videos with audio
-      //  until the user has "interacted" with the page by clicking somewhere at least once; mouseenter events
-      //  don't count.
-      // If the video isn't muted and playback failed with a `NotAllowedError`, this means the browser blocked
-      // playing the video because the user hasn't clicked anywhere on the page yet.
-      if (!videoElement.muted && error.name === "NotAllowedError") {
-        console.warn(
-          "HoverVideoPlayer: Playback with sound was blocked by the browser. Attempting to play again with the video muted; audio will be restored if the user clicks on the page."
-        );
-        // Mute the video and attempt to play again
-        videoElement.muted = true;
-        playVideo();
+        // Additional handling for when browsers block playback for unmuted videos.
+        // This is unfortunately necessary because most modern browsers do not allow playing videos with audio
+        //  until the user has "interacted" with the page by clicking somewhere at least once; mouseenter events
+        //  don't count.
+        // If the video isn't muted and playback failed with a `NotAllowedError`, this means the browser blocked
+        // playing the video because the user hasn't clicked anywhere on the page yet.
+        if (!videoElement.muted && error.name === "NotAllowedError") {
+          console.warn(
+            "HoverVideoPlayer: Playback with sound was blocked by the browser. Attempting to play again with the video muted; audio will be restored if the user clicks on the page."
+          );
+          // Mute the video and attempt to play again
+          videoElement.muted = true;
+          playVideo();
 
-        // When the user clicks on the document, unmute the video since we should now
-        // be free to play audio
-        const onClickDocument = () => {
-          videoElement.muted = false;
+          // When the user clicks on the document, unmute the video since we should now
+          // be free to play audio
+          const onClickDocument = () => {
+            videoElement.muted = false;
 
-          // Clean up the event listener so it is only fired once
-          document.removeEventListener("click", onClickDocument);
-        };
-        document.addEventListener("click", onClickDocument);
-      } else {
-        // Log any other playback errors with console.error
-        console.error(`HoverVideoPlayer: ${error.message}`);
-      }
-    });
-  }, []);
+            // Clean up the event listener so it is only fired once
+            document.removeEventListener("click", onClickDocument);
+          };
+          document.addEventListener("click", onClickDocument);
+        } else {
+          // Log any other playback errors with console.error
+          console.error(`HoverVideoPlayer: ${error.message}`);
+        }
+      });
+    }
+  }, [isYouTube, playbackRangeStart]);
 
   // Effect attempts to start playing the video if the user is hovering over the hover target
   // and the video is loaded enough to be played
@@ -276,15 +289,25 @@ export default function HoverVideoPlayer({
 
     if (!isHovering && (isPlaying || isLoading)) {
       const pauseVideo = () => {
-        videoElement.pause();
+        if (isYouTube) {
+          playerRef.current?.getInternalPlayer().pauseVideo();
+        } else {
+          videoElement.pause();
+        }
 
         // Performing post-save cleanup tasks in here rather than the onPause listener
         // because onPause can also be called when the video reaches the end of a playback range
         // and it's just simpler to deal with that separately
         if (restartOnPaused) {
-          videoElement.currentTime = playbackRangeStart || 0;
+          if (isYouTube) {
+            playerRef.current?.seekTo(playbackRangeStart || 0);
+          } else {
+            videoElement.currentTime = playbackRangeStart || 0;
+          }
         }
-        nextVideoStartTimeRef.current = videoElement.currentTime;
+        nextVideoStartTimeRef.current = isYouTube
+          ? playerRef.current?.getCurrentTime()!
+          : videoElement.currentTime;
       };
 
       if (shouldWaitForOverlayTransitionBeforePausing) {
@@ -307,6 +330,7 @@ export default function HoverVideoPlayer({
     playbackRangeStart,
     restartOnPaused,
     shouldWaitForOverlayTransitionBeforePausing,
+    isYouTube,
   ]);
 
   // Effect cancels any pending timeouts when the component unmounts
@@ -499,94 +523,112 @@ export default function HoverVideoPlayer({
           {hoverOverlay}
         </div>
       ) : null}
-      {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
-      <video
-        src={
-          hasStringSrc && !shouldUnloadVideo
-            ? (currentVideoSrc.current as string)
-            : undefined
-        }
-        // If a playback range is set, the loop attribute will not work correctly so there's no point in setting it here;
-        // in that case, we will manually implement this behavior
-        loop={isUsingPlaybackRange ? false : loop}
-        playsInline
-        preload={preload}
-        crossOrigin={crossOrigin}
-        ref={videoRef}
-        style={{
-          ...videoSizingStyles[sizingMode],
-          objectFit: "cover",
-          ...videoStyle,
-        }}
-        controls={controls}
-        controlsList={controlsList}
-        className={videoClassName}
-        id={videoId}
-        onPlaying={() => setIsPlaying(true)}
-        onPause={() => setIsPlaying(false)}
-        onEnded={() => setIsPlaying(false)}
-        // Update state when the video starts loading
-        onLoadStart={() => setIsLoading(true)}
-        // Update that we're no longer loading when the video has suspended loading data
-        onSuspend={() => setIsLoading(false)}
-        // Update that we are loading if the video is waiting for data to continue playing
-        onWaiting={() => setIsLoading(true)}
-        onLoadedData={() => {
-          // As video data is loaded, check if we've loaded enough data to start playing the video
-          // and update state accordingly
-          setIsLoading(
-            (videoRef.current?.readyState || 0) <
-              HTMLMediaElement.HAVE_ENOUGH_DATA
-          );
-        }}
-        onAbort={() => {
-          // If loading is aborted, update state
-          setIsLoading(false);
-        }}
-        onTimeUpdate={
-          // If there's a playback range set, the traditional `loop` video prop won't work correctly so
-          // we'll need watch the video's time as it plays and manually keep it within the bounds of the range
-          isUsingPlaybackRange
-            ? () => {
-                const videoElement = videoRef.current;
-                if (!videoElement) return;
+      {isYouTube ? (
+        <ReactPlayer
+          ref={playerRef}
+          url={videoSrc as string}
+          width="100%"
+          height="100%"
+          playing={isPlaying}
+          muted={muted}
+          volume={volume}
+          loop={loop}
+          onReady={() => setIsLoading(false)}
+          onBuffer={() => setIsLoading(true)}
+          onBufferEnd={() => setIsLoading(false)}
+          config={{ playerVars: { controls: controls ? 1 : 0 } }}
+        />
+      ) : (
+        // eslint-disable-next-line jsx-a11y/media-has-caption
+        <video
+          src={
+            hasStringSrc && !shouldUnloadVideo
+              ? (currentVideoSrc.current as string)
+              : undefined
+          }
+          // If a playback range is set, the loop attribute will not work correctly so there's no point in setting it here;
+          // in that case, we will manually implement this behavior
+          loop={isUsingPlaybackRange ? false : loop}
+          playsInline
+          preload={preload}
+          crossOrigin={crossOrigin}
+          ref={videoRef}
+          style={{
+            ...videoSizingStyles[sizingMode],
+            objectFit: "cover",
+            ...videoStyle,
+          }}
+          controls={controls}
+          controlsList={controlsList}
+          className={videoClassName}
+          id={videoId}
+          onPlaying={() => setIsPlaying(true)}
+          onPause={() => setIsPlaying(false)}
+          onEnded={() => setIsPlaying(false)}
+          // Update state when the video starts loading
+          onLoadStart={() => setIsLoading(true)}
+          // Update that we're no longer loading when the video has suspended loading data
+          onSuspend={() => setIsLoading(false)}
+          // Update that we are loading if the video is waiting for data to continue playing
+          onWaiting={() => setIsLoading(true)}
+          onLoadedData={() => {
+            // As video data is loaded, check if we've loaded enough data to start playing the video
+            // and update state accordingly
+            setIsLoading(
+              (videoRef.current?.readyState || 0) <
+                HTMLMediaElement.HAVE_ENOUGH_DATA
+            );
+          }}
+          onAbort={() => {
+            // If loading is aborted, update state
+            setIsLoading(false);
+          }}
+          onTimeUpdate={
+            // If there's a playback range set, the traditional `loop` video prop won't work correctly so
+            // we'll need watch the video's time as it plays and manually keep it within the bounds of the range
+            isUsingPlaybackRange
+              ? () => {
+                  const videoElement = videoRef.current;
+                  if (!videoElement) return;
 
-                const maxVideoTime = playbackRangeEnd || videoElement.duration;
-                const minVideoTime = playbackRangeStart || 0;
+                  const maxVideoTime =
+                    playbackRangeEnd || videoElement.duration;
+                  const minVideoTime = playbackRangeStart || 0;
 
-                const { currentTime } = videoElement;
+                  const { currentTime } = videoElement;
 
-                if (loop && currentTime >= maxVideoTime) {
-                  // If the video should loop and is >= the max video time,
-                  // loop it back around to the start
-                  const startTime = playbackRangeStart || 0;
-                  videoElement.currentTime = startTime;
+                  if (loop && currentTime >= maxVideoTime) {
+                    // If the video should loop and is >= the max video time,
+                    // loop it back around to the start
+                    const startTime = playbackRangeStart || 0;
+                    videoElement.currentTime = startTime;
 
-                  // If the video is paused but the user is still hovering,
-                  // meaning it should continue to play, call play() to keep it going
-                  if (
-                    isHovering &&
-                    (videoElement.paused || videoElement.ended)
-                  ) {
-                    playVideo();
+                    // If the video is paused but the user is still hovering,
+                    // meaning it should continue to play, call play() to keep it going
+                    if (
+                      isHovering &&
+                      (videoElement.paused || videoElement.ended)
+                    ) {
+                      playVideo();
+                    }
+                  } else if (currentTime > maxVideoTime) {
+                    // If the video shouldn't loop but we've exceeded the max video time,
+                    // clamp it to the max time and pause it
+                    videoElement.pause();
+                    videoElement.currentTime = maxVideoTime;
+                  } else if (currentTime < minVideoTime) {
+                    // If the video's time somehow ended up before the min video time,
+                    // clamp it to the min time
+                    videoElement.currentTime = minVideoTime;
                   }
-                } else if (currentTime > maxVideoTime) {
-                  // If the video shouldn't loop but we've exceeded the max video time,
-                  // clamp it to the max time and pause it
-                  videoElement.pause();
-                  videoElement.currentTime = maxVideoTime;
-                } else if (currentTime < minVideoTime) {
-                  // If the video's time somehow ended up before the min video time,
-                  // clamp it to the min time
-                  videoElement.currentTime = minVideoTime;
                 }
-              }
-            : undefined
-        }
-      >
-        {shouldUnloadVideo || hasStringSrc ? null : currentVideoSrc.current}
-        {videoCaptions}
-      </video>
+              : undefined
+          }
+        >
+          {shouldUnloadVideo || hasStringSrc ? null : currentVideoSrc.current}
+          {videoCaptions}
+        </video>
+      )}
     </div>
   );
 }
