@@ -21,8 +21,6 @@
     "docs:build": "vuepress build docs",
     "validate-docs": "npx ts-node scripts/validateReadme.ts",
     "commit": "git-cz",
-    "prepare": "husky install",
-    "prepack": "npx ts-node scripts/copyDocsReadmeToRoot.ts",
     "test": "playwright test -c tests/playwright.config.ts"
   },
   "peerDependencies": {
